@@ -1,71 +1,257 @@
 import gradio as gr
-import joblib
 import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
+import plotly.graph_objects as go
+import joblib
 
-# ---------------- LOAD MODEL ----------------
-model = joblib.load("models/model.pkl")
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
 
+# =====================================================
+# LOAD DATA
+# =====================================================
 
-# ---------------- PREDICT FUNCTION ----------------
-def predict(T2M_toc, QV2M_toc, W2M_toc,
-            holiday, school, hour, day, month, weekday):
+data = pd.read_csv("data/archive/continuous dataset.csv")
 
-    # Create input dataframe
-    features = pd.DataFrame([[T2M_toc, QV2M_toc, W2M_toc,
-                              holiday, school, hour, day, month, weekday]],
-                            columns=['T2M_toc','QV2M_toc','W2M_toc',
-                                     'holiday','school','hour','day','month','weekday'])
+data['datetime'] = pd.to_datetime(data['datetime'])
 
-    # Model prediction
-    prediction = model.predict(features)[0]
+# =====================================================
+# LOAD RANDOM FOREST MODEL
+# =====================================================
 
-    # ---------------- ACTUAL VALUE (DEMO PURPOSE) ----------------
-    # In real project, actual comes from dataset test split
-    actual = prediction + np.random.normal(0, 15)
+rf_model = joblib.load("models/model.pkl")
 
-    # ---------------- GRAPH ----------------
-    plt.figure(figsize=(6,4))
-    plt.plot(["Actual", "Predicted"], [actual, prediction],
-             marker="o", linewidth=3)
+# =====================================================
+# LOAD LSTM MODEL
+# =====================================================
 
-    plt.title("⚡ Electricity Demand Forecasting")
-    plt.ylabel("Load (MW)")
-    plt.grid(True)
+lstm_model = load_model("lstm_model.h5")
 
-    graph_path = "graph.png"
-    plt.savefig(graph_path)
-    plt.close()
+# =====================================================
+# SCALER FOR LSTM
+# =====================================================
 
-    return f"⚡ Predicted Demand: {prediction:.2f}", graph_path
+dataset = data['nat_demand'].values.reshape(-1,1)
 
+scaler = MinMaxScaler(feature_range=(0,1))
 
-# ---------------- GRADIO UI ----------------
-app = gr.Interface(
-    fn=predict,
+dataset_scaled = scaler.fit_transform(dataset)
+
+# =====================================================
+# MAIN DASHBOARD FUNCTION
+# =====================================================
+
+def electricity_dashboard(
+    T2M_toc,
+    QV2M_toc,
+    W2M_toc,
+    holiday,
+    school,
+    hour,
+    day,
+    month,
+    weekday
+):
+
+    # =================================================
+    # RANDOM FOREST PREDICTION
+    # =================================================
+
+    features = pd.DataFrame([[
+
+        T2M_toc,
+        QV2M_toc,
+        W2M_toc,
+        holiday,
+        school,
+        hour,
+        day,
+        month,
+        weekday
+
+    ]], columns=[
+
+        'T2M_toc',
+        'QV2M_toc',
+        'W2M_toc',
+        'holiday',
+        'school',
+        'hour',
+        'day',
+        'month',
+        'weekday'
+
+    ])
+
+    rf_prediction = rf_model.predict(features)[0]
+
+    # =================================================
+    # LSTM 24-HOUR FORECAST
+    # =================================================
+
+    future_predictions = []
+
+    last_24 = dataset_scaled[-24:].flatten().tolist()
+
+    temp_input = last_24.copy()
+
+    for i in range(24):
+
+        x_input = np.array(temp_input[-24:])
+        x_input = x_input.reshape(1,24,1)
+
+        yhat = lstm_model.predict(x_input, verbose=0)
+
+        temp_input.append(yhat[0][0])
+
+        prediction = scaler.inverse_transform(
+            yhat.reshape(-1,1)
+        )[0][0]
+
+        future_predictions.append(prediction)
+
+    # =================================================
+    # PEAK / AVERAGE / MINIMUM DEMAND
+    # =================================================
+
+    peak_demand = data['nat_demand'].max()
+
+    average_demand = data['nat_demand'].mean()
+
+    minimum_demand = data['nat_demand'].min()
+
+    # =================================================
+    # AI INSIGHTS
+    # =================================================
+
+    if rf_prediction > average_demand:
+        insight = "⚠ High electricity demand expected."
+    else:
+        insight = "✅ Electricity demand is within normal range."
+
+    # =================================================
+    # ACTUAL VS PREDICTED GRAPH
+    # =================================================
+
+    sample = data.tail(100)
+
+    actual = sample['nat_demand'].values
+
+    fig1 = go.Figure()
+
+    fig1.add_trace(go.Scatter(
+        y=actual,
+        mode='lines',
+        name='Actual Demand'
+    ))
+
+    fig1.add_trace(go.Scatter(
+        y=np.append(actual[:-1], rf_prediction),
+        mode='lines',
+        name='Predicted Demand'
+    ))
+
+    fig1.update_layout(
+        title="⚡ Actual vs Predicted Electricity Demand",
+        xaxis_title="Time",
+        yaxis_title="Demand",
+        template="plotly_dark"
+    )
+
+    # =================================================
+    # 24-HOUR FORECAST GRAPH
+    # =================================================
+
+    fig2 = go.Figure()
+
+    fig2.add_trace(go.Scatter(
+        y=future_predictions,
+        mode='lines+markers',
+        name='24 Hour Forecast'
+    ))
+
+    fig2.update_layout(
+        title="🧠 LSTM 24-Hour Future Forecast",
+        xaxis_title="Next 24 Hours",
+        yaxis_title="Predicted Demand",
+        template="plotly_dark"
+    )
+
+    # =================================================
+    # RESULT TEXT
+    # =================================================
+
+    result = f"""
+
+⚡ RANDOM FOREST DEMAND PREDICTION:
+{rf_prediction:.2f}
+
+🧠 LSTM NEXT HOUR FORECAST:
+{future_predictions[0]:.2f}
+
+🔥 PEAK POWER DEMAND:
+{peak_demand:.2f}
+
+📊 AVERAGE DEMAND:
+{average_demand:.2f}
+
+📉 MINIMUM DEMAND:
+{minimum_demand:.2f}
+
+🤖 AI INSIGHT:
+{insight}
+
+"""
+
+    return result, fig1, fig2
+
+# =====================================================
+# PROFESSIONAL DASHBOARD UI
+# =====================================================
+
+theme = gr.themes.Soft()
+
+demo = gr.Interface(
+
+    fn=electricity_dashboard,
 
     inputs=[
-        gr.Number(label="Temperature (T2M_toc)"),
-        gr.Number(label="Humidity (QV2M_toc)"),
-        gr.Number(label="Wind Speed (W2M_toc)"),
-        gr.Number(label="Holiday (0/1)"),
-        gr.Number(label="School (0/1)"),
-        gr.Number(label="Hour"),
-        gr.Number(label="Day"),
-        gr.Number(label="Month"),
-        gr.Number(label="Weekday")
+
+        gr.Number(label="🌡 Temperature"),
+        gr.Number(label="💧 Humidity"),
+        gr.Number(label="🌬 Wind Speed"),
+        gr.Number(label="🎉 Holiday (0/1)"),
+        gr.Number(label="🏫 School (0/1)"),
+        gr.Number(label="⏰ Hour"),
+        gr.Number(label="📅 Day"),
+        gr.Number(label="📆 Month"),
+        gr.Number(label="🗓 Weekday")
+
     ],
 
     outputs=[
-        gr.Textbox(label="Prediction Output"),
-        gr.Image(label="Actual vs Predicted Graph")
+
+        gr.Textbox(label="⚡ AI Power System Analysis"),
+
+        gr.Plot(label="📊 Actual vs Predicted Graph"),
+
+        gr.Plot(label="🧠 24-Hour Forecast Dashboard")
+
     ],
 
-    title="⚡ Electricity Demand Forecasting AI System",
-    description="ML-based system to predict electricity demand and peak power using weather + calendar data"
+    title="⚡ Intelligent Electricity Load & Peak Demand Forecasting System",
+
+    description="""
+AI-based Electricity Demand Forecasting using:
+
+✅ Random Forest Machine Learning
+✅ LSTM Deep Learning
+✅ Peak Power Demand Analysis
+✅ 24-Hour Future Forecasting
+✅ Interactive Dashboard Analytics
+""",
+
+    theme=theme
 )
 
-
-# ---------------- RUN APP ----------------
-app.launch(share=True)
+demo.launch(share=True)
